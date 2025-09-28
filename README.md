@@ -31,7 +31,7 @@ The MVP serves as a **data-gathering tool**. We aim to measure user engagement a
 |--------------------|------------------|-------------------------------------------------------------------------------|
 | Backend / Logic    | Python           | Handles text extraction, segmentation, study method logic, and TTS engine.    |
 | GUI (Planned)      | Electron + React | Package the web interface into a cross-platform desktop app (Windows/Mac/Linux). |
-| Core Functions     | PyPDF2, pyttsx3  | Local PDF processing and TTS voice functions.                                 |
+| Core Functions     | pypdf, pyttsx3  | Local PDF processing and TTS voice functions.                                 |
 
 ---
 
@@ -71,7 +71,7 @@ pip install -r backend/requirements.txt
 Start the program:
 
 ```bash
-python backend/main.py
+uvicorn backend.main:app --reload
 ```
 
 Follow the prompts in the terminal to load a PDF and select a study method.
