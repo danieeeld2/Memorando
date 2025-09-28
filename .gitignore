@@ -1,0 +1,30 @@
+# Dependencias
+###################
+# Entornos virtuales 
+backend/.venv/
+
+# Ignorar cualquier otro entorno virtual común
+venv/
+.env/
+
+# Archivos de caché de Python
+#############################
+# Bytecode (archivos .pyc)
+__pycache__/
+
+# Logs y archivos de prueba/error
+*.log
+
+# Archivos de distribución
+dist/
+build/
+*.egg-info/
+
+# Archivos de macOS
+#############################
+.DS_Store
+
+# Archivos de Windows
+#############################
+Thumbs.db
+```eof
