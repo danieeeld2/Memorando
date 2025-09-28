@@ -38,5 +38,4 @@ jobs:
       # 5. Execute Pytest
       - name: Run Pytest and Check Imports
         run: |
-          cd backend
           pytest -v tests/
