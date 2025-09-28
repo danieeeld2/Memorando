@@ -1,0 +1,42 @@
+name: CI - Execute Pytest Validation
+
+# The workflow runs on every push to ANY branch and on every Pull Request targeting 'main'.
+on:
+  push:
+    branches:
+      - '**' # Executes on push to any branch
+  pull_request:
+    branches:
+      - main # Executes when a PR is opened/updated targeting 'main'
+  workflow_dispatch:
+
+jobs:
+  test_and_validate:
+    name: Install Dependencies and Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Checkout the repository code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      # 2. Setup Python environment
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      # 3. Install project dependencies
+      - name: Install dependencies
+        # Install from the requirements.txt file located inside the backend directory
+        run: pip install -r backend/requirements.txt
+          
+      # 4. Install Pytest explicitly
+      - name: Install Pytest
+        run: pip install pytest
+
+      # 5. Execute Pytest
+      - name: Run Pytest and Check Imports
+        run: |
+          cd backend
+          pytest -v tests/
