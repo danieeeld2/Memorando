@@ -1,9 +1,10 @@
 import os
 from typing import List, Literal, Tuple
 from pypdf import PdfReader
+import re
 
 # Type alias for the text splitting choice
-TextSplitOption = Literal["paragraph", "line"]
+TextSplitOption = Literal["paragraph", "line", "sentence"]
 
 class DocumentProcessor:
     """
@@ -63,10 +64,9 @@ class DocumentProcessor:
 
     def fragment_text(self, split_by: TextSplitOption = "paragraph") -> List[str]:
         """
-        Splits the extracted text into fragments, either by paragraphs or by lines,
-        to be fed into the study method.
-
-        :param split_by: Fragmentation option ('paragraph' or 'line').
+        Splits the extracted text into fragments: by paragraphs, sentences, or lines.
+        
+        :param split_by: Fragmentation option ('paragraph', 'sentence', or 'line').
         :return: A list of strings, where each string is a study chunk.
         """
         if not self.raw_text:
@@ -74,24 +74,42 @@ class DocumentProcessor:
             self.extract_text()
             if not self.raw_text:
                 return []
-
+        
         # Normalize line breaks and remove excessive white space
         cleaned_text = self.raw_text.replace('\r\n', '\n').replace('\r', '\n')
         
         fragments: List[str] = []
-
+        
         if split_by == "paragraph":
-            # Split by two or more newlines (common paragraph separator in extracted text)
-            # Filter out any empty strings that might result from extra newlines
+            # Split by two or more newlines (common paragraph separator)
             fragments = [
                 p.strip() 
                 for p in cleaned_text.split('\n\n') 
                 if p.strip()
             ]
             print(f"✂️ Text fragmented by paragraph. Total fragments: {len(fragments)}")
-
+        
+        elif split_by == "sentence":
+            # Split by sentence-ending punctuation (., !, ?)
+            # This regex looks for punctuation followed by space/newline or end of string
+            # and keeps the punctuation with the sentence
+            sentence_pattern = r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])|(?<=[.!?])$'
+            
+            # First, replace newlines within paragraphs with spaces
+            text_for_sentences = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_text)
+            
+            # Then split by the sentence pattern
+            raw_sentences = re.split(sentence_pattern, text_for_sentences)
+            
+            fragments = [
+                sent.strip() 
+                for sent in raw_sentences 
+                if sent.strip() and len(sent.strip()) > 3  # Avoid very short fragments
+            ]
+            print(f"✂️ Text fragmented by sentence. Total fragments: {len(fragments)}")
+        
         elif split_by == "line":
-            # Split by single newline and filter out empty lines
+            # Split by single newline (actual lines in the document)
             fragments = [
                 line.strip() 
                 for line in cleaned_text.split('\n') 
@@ -101,9 +119,8 @@ class DocumentProcessor:
         
         else:
             print(f"⚠️ Unknown split option: {split_by}. Defaulting to paragraph split.")
-            # Recursive call with default option
             return self.fragment_text(split_by="paragraph")
-
+        
         return fragments
 
 # --- Example Usage for Terminal Testing ---

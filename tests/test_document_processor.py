@@ -96,3 +96,28 @@ def test_fragment_by_line(mock_reader, mock_pdf_file):
     # Expect more fragments when splitting by single line
     assert len(chunks) == 4
     assert 'This is the second line.' in chunks
+    
+@patch('core.document_processor.PdfReader', side_effect=lambda x: MockPdfReader(MOCK_PAGE_TEXTS))
+def test_fragment_by_sentence(mock_reader, mock_pdf_file):
+    """Tests fragmentation by sentence (split by punctuation marks)."""
+    processor = DocumentProcessor(mock_pdf_file)
+    processor.extract_text() 
+
+    chunks = processor.fragment_text(split_by="sentence")
+    
+    # Expect multiple sentences to be separated
+    assert len(chunks) >= 4  # At least 4 distinct sentences in MOCK_PAGE_TEXTS
+    
+    # Verify that sentences are properly separated
+    # First sentence should contain "first paragraph"
+    assert any("first paragraph" in chunk for chunk in chunks)
+    
+    # Check that each chunk ends with proper punctuation
+    for chunk in chunks:
+        assert chunk.strip()[-1] in '.!?', f"Sentence should end with punctuation: {chunk}"
+    
+    # Verify sentences are independent (not containing multiple sentences)
+    # Count periods/exclamations/questions in each chunk (should be mostly 1)
+    for chunk in chunks:
+        punctuation_count = sum(chunk.count(p) for p in '.!?')
+        assert punctuation_count >= 1, f"Sentence should have at least one punctuation mark: {chunk}"
