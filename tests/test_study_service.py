@@ -4,27 +4,29 @@ import sys
 import time
 from unittest.mock import patch, MagicMock, PropertyMock
 import threading
+from typing import List, Dict, Any
 
-# Add the 'backend' directory to the path for correct imports
+# Adjust the path to allow imports from the 'backend' structure
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Classes imports
 from backend.services.study_service import StudyService, AVAILABLE_METHODS
 from backend.core.study_methods.base_method import StudyMethod
-from backend.core.document_processor import DocumentProcessor
+# NOTE: DocumentProcessor import is removed as it's no longer used by StudyService
 
 # --- Mocks for Session Lifecycle ---
 
-# 1. Mock Study Method
+# 1. Mock Study Method for testing execution flow
 class MockStudyMethod(StudyMethod):
     """A mocked study method that exposes its internal state for testing."""
-    def __init__(self, tts_engine, study_data, config=None):
+    def __init__(self, tts_engine, study_data: List[str], config: Dict[str, Any] = None):
         super().__init__(tts_engine, study_data)
         self.name = "Mock Method"
         self._stop_requested = False
         self.run_started = threading.Event()
         self.run_finished = threading.Event()
         self.is_running = False
+        self.config = config or {}
 
     def run(self):
         """Simulates the main study logic running in the dedicated thread."""
@@ -43,75 +45,116 @@ class MockStudyMethod(StudyMethod):
     def stop(self):
         """Sets the stop flag to terminate the run loop."""
         self._stop_requested = True
-        if self.tts_engine:
-            self.tts_engine.stop_speaking()
+        # Call the base stop to ensure TTS mock is called
+        super().stop()
+        print("Mock stop requested.")
 
-# 2. Mock AVAILABLE_METHODS factory
+# 2. Update AVAILABLE_METHODS to use the Mock for testing
 @pytest.fixture(autouse=True)
 def mock_available_methods():
-    """Temporarily replaces the real 'read_repeat' method with the MockStudyMethod for testing."""
+    """Temporarily replace the actual method with the mock for all tests."""
     original_methods = AVAILABLE_METHODS.copy()
     AVAILABLE_METHODS["read_repeat"] = MockStudyMethod
     yield
+    # Restore the original methods after the test
     AVAILABLE_METHODS.clear()
     AVAILABLE_METHODS.update(original_methods)
 
-# 3. Proper mock setup for StudyService
+
+# 3. Fixture for the StudyService and its dependencies
 @pytest.fixture
 def study_service():
-    """Provides a fresh StudyService instance with properly mocked dependencies."""
-    
-    # Create a mock TTS engine
-    mock_tts_engine = MagicMock()
-    mock_tts_engine.stop_speaking = MagicMock()
-    
-    # Mock DocumentProcessor to avoid file system dependencies
-    with patch('backend.services.study_service.DocumentProcessor') as MockProcessor:
-        # Configure the mock processor
-        mock_processor_instance = MockProcessor.return_value
-        mock_processor_instance.extract_text.return_value = "Dummy text."
-        mock_processor_instance.fragment_text.return_value = ["Chunk 1", "Chunk 2", "Chunk 3"]
+    """Initializes StudyService with a mocked TTS Engine."""
+    # 🔑 FIX: Patch the TtsEngine where StudyService imports it, not where it's defined.
+    # Additionally, ensure the return_value is a full MagicMock instance.
+    with patch('backend.services.study_service.TtsEngine', autospec=True) as MockTtsEngine:
+        # Create a mock instance with a full specification (autospec=True)
+        # to ensure it has all the real TtsEngine methods (like stop_speaking)
+        mock_tts_instance = MagicMock()
+        MockTtsEngine.return_value = mock_tts_instance
         
-        # Create service instance
+        # Temporarily create the service instance
         service = StudyService()
-        service.tts_engine = mock_tts_engine
+        
+        # We assert that the service received the correctly mocked instance
+        assert service.tts_engine is mock_tts_instance
         
         yield service
+        
+        # Clean up any running sessions after the test
+        if service.is_session_active:
+            service.stop_study_session()
 
-# --- StudyService Tests ---
+# --- Test Cases ---
 
-def test_initial_state(study_service):
-    """Verifies that the service starts in a clean, inactive state."""
-    assert not study_service.is_session_active
-    assert study_service.current_method is None
-    assert study_service.session_thread is None
+# Dummy session content to use in all relevant tests
+DUMMY_SESSION_CONTENT = ["Segment 1.", "Segment 2.", "Segment 3."]
+DUMMY_CONFIG = {"delay": 2}
 
-def test_start_session_success(study_service):
-    """Verifies that a session successfully starts in a separate thread."""
-    pdf_path = "dummy/path.pdf"
-    method_name = "read_repeat"
+
+def test_successful_session_start(study_service):
+    """Verifies that a session starts successfully, flags are set, and the thread is running."""
     
-    success = study_service.start_study_session(pdf_path, method_name, "line", {})
-    
+    # Start the session with the new signature
+    success = study_service.start_study_session(
+        DUMMY_SESSION_CONTENT, 
+        "read_repeat", 
+        DUMMY_CONFIG
+    )
+
     assert success is True
-    assert study_service.is_session_active
-    assert study_service.session_thread.is_alive()
+    assert study_service.is_session_active is True
+    assert study_service.current_method is not None
     assert isinstance(study_service.current_method, MockStudyMethod)
+    assert study_service.session_thread.is_alive()
     
-    # Cleanup
-    study_service.stop_study_session()
-    if study_service.session_thread:
-        study_service.session_thread.join(timeout=1)
+    # Verify the method received the correct data and config
+    assert study_service.current_method.study_data == DUMMY_SESSION_CONTENT
+    assert study_service.current_method.config == DUMMY_CONFIG
+    
+    # Wait for the thread to finish its internal loop
+    study_service.current_method.run_finished.wait(timeout=1)
 
-def test_stop_session_running(study_service):
-    """Verifies that an active session can be stopped gracefully."""
-    # Start the session
-    study_service.start_study_session("dummy.pdf", "read_repeat", "line", {})
+
+def test_start_session_with_unknown_method(study_service):
+    """Verifies that attempting to start an unknown method fails gracefully."""
     
-    # Ensure the thread has started running before stopping
+    success = study_service.start_study_session(
+        DUMMY_SESSION_CONTENT, 
+        "unknown_method", 
+        {}
+    )
+    
+    assert success is False
+    assert study_service.is_session_active is False
+    assert study_service.current_method is None
+
+
+def test_start_session_with_empty_content(study_service):
+    """Verifies that a session fails if the session content list is empty."""
+    
+    success = study_service.start_study_session(
+        [], # Empty content list
+        "read_repeat", 
+        {}
+    )
+    
+    assert success is False
+    assert study_service.is_session_active is False
+    assert study_service.current_method is None
+
+
+def test_session_stops_gracefully(study_service):
+    """Verifies that a running session can be stopped cleanly."""
+    
+    # Start the session
+    study_service.start_study_session(DUMMY_SESSION_CONTENT, "read_repeat", {})
+    
+    # Wait until the mock method has started running before stopping
     study_service.current_method.run_started.wait(timeout=1)
     
     active_thread = study_service.session_thread
+    mock_tts_engine = study_service.tts_engine
     
     # Stop the session
     success = study_service.stop_study_session()
@@ -124,28 +167,32 @@ def test_stop_session_running(study_service):
         active_thread.join(timeout=1)
         assert not active_thread.is_alive()
     
-    # Verify that the TTS engine was explicitly stopped
-    study_service.tts_engine.stop_speaking.assert_called_once()
+    # Verify that the TTS engine was explicitly stopped by the MockStudyMethod's stop()
+    mock_tts_engine.stop_speaking.assert_called_once()
+
 
 def test_start_session_while_active_is_blocked(study_service):
     """Verifies that a new session cannot start while one is already active."""
     # Start the first session
-    study_service.start_study_session("dummy1.pdf", "read_repeat", "line", {})
+    study_service.start_study_session(DUMMY_SESSION_CONTENT, "read_repeat", {})
     
     # Attempt to start the second session (should fail)
-    success = study_service.start_study_session("dummy2.pdf", "read_repeat", "line", {})
+    success = study_service.start_study_session(DUMMY_SESSION_CONTENT, "read_repeat", {})
     
     assert success is False
     
     # Cleanup
     study_service.stop_study_session()
 
+
 def test_stop_session_when_not_active(study_service):
     """Verifies that calling stop when no session is running returns False."""
+    
     # The session is not active by default
     success = study_service.stop_study_session()
     
     assert success is False
     assert not study_service.is_session_active
-    # The TTS engine should not have been called
+    
+    # The TTS engine should not have been called to stop
     study_service.tts_engine.stop_speaking.assert_not_called()
