@@ -32,3 +32,8 @@ Thumbs.db
 # Archivos auxiliares
 #############################
 mis_notas.pdf
+
+# Archivos adicionales
+############################
+*.db
+*.txt
