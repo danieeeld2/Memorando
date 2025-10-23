@@ -80,6 +80,21 @@ class DBManager:
                 FOREIGN KEY (document_id) REFERENCES documents (id)
             );
         """)
+        
+        # 4. Study Sessions Table 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                document_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                session_json_path TEXT NOT NULL, -- Ruta al archivo JSON de esta sesión
+                segment_count INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id),
+                FOREIGN KEY (document_id) REFERENCES documents (id)
+            );
+        """)
 
         conn.commit()
         conn.close()

@@ -1,4 +1,8 @@
 from typing import List, Dict, Any
+import json
+import os
+import math
+from backend.core.db_manager import db_manager # Importar el db_manager global
 
 # Type definitions for structured document content and flat session content
 DocumentContent = List[Dict[str, Any]]
@@ -20,44 +24,99 @@ class SessionManager:
         """
         self.document_content = full_document_content
 
-    def get_available_sessions(self) -> List[Dict[str, str]]:
+    def _flatten_all_segments(self) -> List[str]:
         """
-        Returns a list of available sessions based on the document structure.
-        Currently, each chapter/title is considered a session.
+        Extracts all segments from all chapters into a single flat list.
         """
-        sessions = []
-        for i, chapter in enumerate(self.document_content):
-            sessions.append({
-                "session_id": f"chapter_{i}",
-                "title": chapter.get("title", f"Sesión {i+1}"),
-                "segment_count": len(chapter.get("segments", []))
-            })
-        return sessions
+        all_segments = []
+        for chapter in self.document_content:
+            all_segments.extend(chapter.get("segments", []))
+        return all_segments
 
-    def generate_session_content(self, session_id: str, max_segments: int = 50) -> SessionContent:
+    def create_and_store_sessions_by_segments(
+        self, 
+        user_id: int, 
+        document_id: int, 
+        segments_per_session: int
+    ) -> List[Dict[str, Any]]:
         """
-        Extracts the content for a specific session, limiting the number of segments.
+        Divides the document into sessions based on a fixed number of segments,
+        saves each session as a separate JSON file, and registers it in the DB.
         
-        :param session_id: The ID of the session to extract (e.g., 'chapter_0').
-        :param max_segments: The maximum number of text segments for the session.
-        :return: A flat list of strings (text segments) for the session.
+        :param user_id: ID of the user owning the session.
+        :param document_id: ID of the parent document.
+        :param segments_per_session: The 'n' value for chunking.
+        :return: A list of dictionaries containing metadata of created sessions.
         """
         
-        try:
-            chapter_index = int(session_id.split('_')[-1])
-            chapter = self.document_content[chapter_index]
-            
-            segments = chapter.get("segments", [])
-            
-            # Apply the segment limit for manageability
-            session_data = segments[:max_segments]
-            
-            print(f"Session '{chapter.get('title')}' generated with {len(session_data)} segments.")
-            return session_data
-            
-        except (IndexError, ValueError) as e:
-            print(f"❌ Error generating session content for {session_id}: {e}")
+        all_segments = self._flatten_all_segments()
+        if not all_segments:
+            print("⚠️ No segments found in the document content.")
             return []
+
+        num_sessions = math.ceil(len(all_segments) / segments_per_session)
+        created_sessions = []
+        
+        conn = db_manager.get_connection()
+        cursor = conn.cursor()
+
+        try:
+            for i in range(num_sessions):
+                start_index = i * segments_per_session
+                end_index = start_index + segments_per_session
+                
+                # Obtener el chunk de segmentos
+                session_segments = all_segments[start_index:end_index]
+                
+                session_title = f"Document {document_id} - Part {i+1}"
+                
+                # Crear el contenido del "SUBJSON"
+                session_data = {
+                    "title": session_title,
+                    "segments": session_segments
+                }
+                
+                # Generar ruta y nombre de archivo
+                filename = f"doc{document_id}_user{user_id}_session{i+1}.json"
+                filepath = os.path.join(db_manager.DOC_STORAGE_PATH, filename)
+                
+                # 1. Guardar el archivo "SUBJSON" localmente
+                try:
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        json.dump(session_data, f, ensure_ascii=False, indent=4)
+                except IOError as e:
+                    print(f"❌ Error saving session file {filepath}: {e}")
+                    continue # Saltar esta sesión si falla el guardado
+                    
+                # 2. Registrar la sesión en la BBDD
+                cursor.execute(
+                    """
+                    INSERT INTO study_sessions 
+                    (user_id, document_id, title, session_json_path, segment_count)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (user_id, document_id, session_title, filepath, len(session_segments))
+                )
+                
+                session_id = cursor.lastrowid
+                created_sessions.append({
+                    "session_id": session_id,
+                    "title": session_title,
+                    "segment_count": len(session_segments),
+                    "path": filepath
+                })
+            
+            conn.commit()
+            print(f"✅ Successfully created and stored {len(created_sessions)} sessions.")
+            
+        except Exception as e:
+            conn.rollback()
+            print(f"❌ Error creating sessions in DB: {e}")
+        finally:
+            conn.close()
+            
+        return created_sessions
+
 
 # Example of the structured JSON content expected by the manager
 EXAMPLE_DOCUMENT_JSON: DocumentContent = [
