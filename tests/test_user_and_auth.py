@@ -2,6 +2,7 @@ import pytest
 import os
 import sys
 import sqlite3
+import shutil # Import shutil for robust directory cleanup
 from fastapi.testclient import TestClient
 from fastapi import status # Import HTTP status codes for clarity
 
@@ -28,11 +29,12 @@ class TestDBManager(db_module.DBManager):
         # Initialize the temporary DB and tables
         self.initialize_db()
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function") # Changed scope to 'function' for per-test isolation
 def isolated_user_service(tmp_path_factory):
     """
     Creates a completely isolated UserService instance with its own
-    temporary DBManager and database file.
+    temporary DBManager and database file. The scope='function' ensures
+    a fresh, empty database for every test function.
     """
     # 1. Setup temporary paths
     temp_dir = tmp_path_factory.mktemp("test_db_auth")
@@ -46,20 +48,20 @@ def isolated_user_service(tmp_path_factory):
     
     yield test_service
     
-    # 3. Teardown: Clean up the temporary database file
+    # 3. Teardown: Clean up the temporary database file and directory
     if os.path.exists(test_db_path):
         os.remove(test_db_path)
+        
     if os.path.exists(test_doc_path):
-        try:
-             os.rmdir(test_doc_path)
-        except OSError:
-             pass
+        # Use shutil.rmtree for recursive and robust directory removal
+        shutil.rmtree(test_doc_path, ignore_errors=True)
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function") # Changed scope to 'function'
 def test_client_with_override(isolated_user_service):
     """
     Provides a TestClient that overrides the global get_user_service 
-    dependency with our isolated test service.
+    dependency with our isolated test service. Scope='function' ensures
+    the override is reset for every test function.
     """
     # Function that returns the isolated service
     def override_get_user_service():

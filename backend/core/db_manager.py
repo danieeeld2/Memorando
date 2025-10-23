@@ -1,45 +1,45 @@
 import sqlite3
 import os
+from typing import Optional, Dict, Any
 
 # --- File Configuration ---
 
-# Database file name
 DB_NAME = "memorando_data.db"
-# Directory where extracted JSON files will be stored
 DOC_STORAGE_DIR = "documents_json" 
 
-# Full paths
+# Default paths (used by the global instance)
 DB_PATH = os.path.join(os.getcwd(), DB_NAME)
 DOC_STORAGE_PATH = os.path.join(os.getcwd(), DOC_STORAGE_DIR)
 
 class DBManager:
-    """
-    Centralized SQLite connection and schema manager.
-    """
+    """Centralized SQLite connection and schema manager."""
     
     def __init__(self):
-        # Ensure the storage directory exists when the manager is instantiated
+        # Assign default global paths to instance variables if not set by a subclass (e.g., TestDBManager)
+        if not hasattr(self, 'DB_PATH'):
+            self.DB_PATH = DB_PATH
+        if not hasattr(self, 'DOC_STORAGE_PATH'):
+            self.DOC_STORAGE_PATH = DOC_STORAGE_PATH
+
+        # Ensure the storage directory exists using the instance path
         self._ensure_storage_directory_exists()
 
     def _ensure_storage_directory_exists(self):
-        """
-        Creates the local directory for storing document JSON files if it doesn't exist.
-        """
-        if not os.path.exists(DOC_STORAGE_PATH):
-            os.makedirs(DOC_STORAGE_PATH)
-            print(f"📁 Storage directory created: {DOC_STORAGE_PATH}")
+        """Creates the local directory for storing document JSON files if it doesn't exist."""
+        if not os.path.exists(self.DOC_STORAGE_PATH):
+            os.makedirs(self.DOC_STORAGE_PATH)
+            print(f"📁 Storage directory created: {self.DOC_STORAGE_PATH}")
         else:
-            print(f"📁 Storage directory already exists: {DOC_STORAGE_PATH}")
+            print(f"📁 Storage directory already exists: {self.DOC_STORAGE_PATH}")
 
 
-    def get_connection(self):
-        """Returns a new database connection."""
-        return sqlite3.connect(DB_PATH)
+    def get_connection(self) -> sqlite3.Connection:
+        """Returns a new database connection, using the instance path."""
+        # CRITICAL FIX: Use self.DB_PATH to connect to the correct database (test or production)
+        return sqlite3.connect(self.DB_PATH)
 
     def initialize_db(self):
-        """
-        Creates database tables if they do not exist.
-        """
+        """Creates database tables if they do not exist."""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -60,7 +60,7 @@ class DBManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
-                json_file_path TEXT NOT NULL, -- PATH TO THE EXTRACTED JSON FILE
+                json_file_path TEXT NOT NULL,
                 upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users (id)
             );
@@ -86,5 +86,5 @@ class DBManager:
         print(f"✅ Database '{DB_NAME}' and tables initialized.")
 
 
-# Single instantiation
+# Single instantiation for production/development use
 db_manager = DBManager()
