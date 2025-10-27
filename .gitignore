@@ -6,6 +6,7 @@ backend/.venv/
 # Ignorar cualquier otro entorno virtual común
 venv/
 .env/
+*.env
 
 # Archivos de caché de Python
 #############################
