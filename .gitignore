@@ -38,3 +38,5 @@ mis_notas.pdf
 ############################
 *.db
 *.txt
+*.pdf
+documents_json/
