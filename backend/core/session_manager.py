@@ -1,15 +1,21 @@
 import json
 import os
 import sqlite3
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 from backend.core.db_manager import db_manager
 
 class SessionManager:
     """Manages the creation and storage of study sessions from document content."""
     
-    def __init__(self, document_data: Dict[str, Any]):
+    def __init__(self, document_data: Union[Dict[str, Any], List[Dict[str, Any]]]):
         self.document_data = document_data
-        print(f"📄 SessionManager initialized with data: {list(document_data.keys()) if document_data else 'None'}")
+        
+        if isinstance(document_data, dict):
+            print(f"📄 SessionManager initialized with dict: {list(document_data.keys())}")
+        elif isinstance(document_data, list):
+            print(f"📄 SessionManager initialized with list of {len(document_data)} items")
+        else:
+            print(f"📄 SessionManager initialized with data: {type(document_data)}")
 
     def _flatten_all_segments(self) -> List[str]:
         """Extracts all segments/texts from the structured document."""
@@ -19,46 +25,46 @@ class SessionManager:
             print("⚠️  No document data available")
             return all_segments
         
-        # First try with the new (converted) structure
-        chapters = self.document_data.get("chapters", [])
-        print(f"📖 Found {len(chapters)} chapters")
+        chapters = []
+        
+        if isinstance(self.document_data, list):
+            chapters = self.document_data
+            print(f"📖 Processing simplified format: {len(chapters)} chapters")
+        elif isinstance(self.document_data, dict):
+            chapters = self.document_data.get("chapters", [])
+            print(f"📖 Processing Gemini format: {len(chapters)} chapters")
         
         for i, chapter in enumerate(chapters):
             if not isinstance(chapter, dict):
                 print(f"⚠️  Chapter {i} is not a dictionary: {type(chapter)}")
                 continue
-                
-            print(f"📖 Processing chapter {i}: {list(chapter.keys())}")
             
-            # Look for direct segments (converted structure)
+            # Find segments
             segments = chapter.get("segments", [])
             if segments:
-                print(f"📝 Found {len(segments)} direct segments")
+                print(f"📝 Found {len(segments)} direct segments in chapter {i}")
                 all_segments.extend(segments)
                 continue
-                
-            # If no segments, look in the original Gemini structure
+            
+            # If not segments, process Gemini structure
             sections = chapter.get("sections", [])
             print(f"📝 Chapter {i} has {len(sections)} sections")
             
             for j, section in enumerate(sections):
                 if not isinstance(section, dict):
                     continue
-                    
-                paragraphs = section.get("paragraphs", [])
-                print(f"📝 Section {j} has {len(paragraphs)} paragraphs")
                 
-                for k, paragraph in enumerate(paragraphs):
+                paragraphs = section.get("paragraphs", [])
+                
+                for paragraph in paragraphs:
                     if not isinstance(paragraph, dict):
                         continue
-                        
+                    
                     lines = paragraph.get("lines", [])
-                    print(f"📝 Paragraph {k} has {len(lines)} lines")
                     all_segments.extend(lines)
         
         print(f"📊 Total segments extracted: {len(all_segments)}")
         
-        # Filter empty segments and ensure they are strings
         filtered_segments = []
         for seg in all_segments:
             if seg and isinstance(seg, str):
@@ -66,7 +72,6 @@ class SessionManager:
         
         print(f"📊 Segments after filtering: {len(filtered_segments)}")
         
-        # Show some segments for debugging
         for i, seg in enumerate(filtered_segments[:3]):
             print(f"📄 Segment {i+1}: {seg[:50]}...")
         
@@ -143,7 +148,5 @@ class SessionManager:
 
     def create_sessions_by_chapters(self, user_id: int, document_id: int) -> List[Dict[str, Any]]:
         """Creates one session per document chapter."""
-        # This function may need similar adjustments
-        # For now we focus on the main function
         print("⚠️  create_sessions_by_chapters not fully implemented")
         return []

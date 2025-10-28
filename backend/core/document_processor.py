@@ -9,8 +9,9 @@ from dotenv import load_dotenv
 # Load API Keys
 load_dotenv()
 
-# The client will automatically read the GEMINI_API_KEY environment variable.
-client = genai.Client() 
+def _get_client():
+    """Lazy initialization of the Gemini client."""
+    return genai.Client()
 
 # --- CONFIGURATION: JSON SCHEMA ---
 # Defines the JSON schema to ensure consistent structured output from the model.
@@ -117,6 +118,9 @@ def process_pdf_to_json(user_pdf_path: str, model_name: str = "gemini-2.5-flash"
     """
     pdf_file = None
     try:
+        # Initialize client
+        client = _get_client()
+        
         # 1. Upload the user file
         print(f"Uploading file for analysis: {os.path.basename(user_pdf_path)}...")
         pdf_file = client.files.upload(file=user_pdf_path)
