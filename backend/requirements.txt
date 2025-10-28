@@ -1,4 +1,6 @@
-pypdf~=3.17.4
+google-genai~=1.46.0
+python-dotenv~=1.0.0
+
 pyttsx3~=2.9
 bcrypt~=4.1.2
 

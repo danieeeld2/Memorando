@@ -1,177 +1,155 @@
 import os
-from typing import List, Literal, Tuple
-from pypdf import PdfReader
-import re
+import json
+from google import genai
+from google.genai import types
+from datetime import date
+from typing import Dict, Any
+from dotenv import load_dotenv 
 
-# Type alias for the text splitting choice
-TextSplitOption = Literal["paragraph", "line", "sentence"]
+# Load API Keys
+load_dotenv()
 
-class DocumentProcessor:
+# The client will automatically read the GEMINI_API_KEY environment variable.
+client = genai.Client() 
+
+# --- CONFIGURATION: JSON SCHEMA ---
+# Defines the JSON schema to ensure consistent structured output from the model.
+json_schema = types.Schema(
+    type=types.Type.OBJECT,
+    required=["title", "uploaded_date", "language", "chapters", "structured_elements"],
+    properties={
+        "title": types.Schema(type=types.Type.STRING, description="Main title of the PDF document."),
+        "uploaded_date": types.Schema(type=types.Type.STRING, description="Today's date in YYYY-MM-DD format.", format="date"),
+        "language": types.Schema(type=types.Type.STRING, description="Detect the predominant language ('es' for Spanish, 'en' for English).", enum=["es", "en"]),
+        "chapters": types.Schema(
+            type=types.Type.ARRAY,
+            description="List of chapters or main sections containing narrative study text.",
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                required=["chapter_title", "sections"],
+                properties={
+                    "chapter_title": types.Schema(type=types.Type.STRING, description="The chapter or main section title."),
+                    "sections": types.Schema(
+                        type=types.Type.ARRAY,
+                        description="Subsections within the chapter.",
+                        items=types.Schema(
+                            type=types.Type.OBJECT,
+                            required=["section_title", "paragraphs"],
+                            properties={
+                                "section_title": types.Schema(type=types.Type.STRING, description="The subsection title."),
+                                "paragraphs": types.Schema(
+                                    type=types.Type.ARRAY,
+                                    description="List of paragraphs within this subsection.",
+                                    items=types.Schema(
+                                        type=types.Type.OBJECT,
+                                        required=["lines"],
+                                        properties={
+                                            "lines": types.Schema(
+                                                type=types.Type.ARRAY,
+                                                description="The content of the paragraph, subdivided into individual sentences/clauses.",
+                                                items=types.Schema(type=types.Type.STRING),
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    ),
+                },
+            ),
+        ),
+        "structured_elements": types.Schema(
+            type=types.Type.ARRAY,
+            description="List of non-narrative elements (tables, figures, code, etc.) extracted in RAW format.",
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                required=["element_type", "content_raw"],
+                properties={
+                    "element_type": types.Schema(
+                        type=types.Type.STRING,
+                        description="Classification of the structured element.",
+                        enum=["table", "list_of_parameters", "code_snippet", "figure_caption", "json_example"],
+                    ),
+                    "content_raw": types.Schema(
+                        type=types.Type.STRING,
+                        description="The text of the structured element, extracted as is.",
+                    ),
+                    "context_heading": types.Schema(
+                        type=types.Type.STRING,
+                        description="The closest preceding heading to provide context.",
+                    ),
+                },
+            ),
+        ),
+    },
+)
+
+# Define the final instruction prompt
+PROMPT_INSTRUCTION = """
+An attached PDF document is provided below for analysis.
+
+Your sole task is to generate a single JSON object that strictly follows the provided schema and completes two main extraction tasks:
+
+1. Metadata Extraction: Fill `title`, `uploaded_date` (today's date, YYYY-MM-DD), and `language` ('es' or 'en').
+2. Narrative Text Extraction (`chapters` array):
+    * Extract **only** the narrative text (the main body content) and ignore all tables, technical lists, and code examples.
+    * Structure the narrative text into **Chapters** (`chapters`), then **Subsections** (`sections`), and then **Paragraphs** (`paragraphs`).
+    * **CRITICAL:** The content of each paragraph must be subdivided into a **List of Lines** (`lines`). Each element in this array must be a **complete, grammatically independent sentence or clause**, separated by punctuation marks (periods, question marks, exclamation points).
+3. Structured Elements Extraction (`structured_elements` array):
+    * Extract **all** tables, parameter lists, or code/JSON examples that were skipped in the narrative extraction.
+    * For each element, fill `content_raw` with the text extracted **exactly as it appears** (preserving the table format or list structure).
+    * Classify each element using the `element_type` enum (e.g., 'table', 'json_example', 'list_of_parameters').
+    * Provide the closest preceding heading in `context_heading` to aid identification.
+
+Ensure that all content is included in either the `chapters` or `structured_elements` array.
+"""
+
+# --- MAIN PROCESSING FUNCTION ---
+
+def process_pdf_to_json(user_pdf_path: str, model_name: str = "gemini-2.5-flash") -> dict | None:
     """
-    Class responsible for loading PDF documents and processing their text content.
-    Uses PyPDF2 for text extraction.
-    """
-
-    def __init__(self, pdf_path: str):
-        """
-        Initializes the processor with the path to the PDF file.
-
-        :param pdf_path: Path to the PDF file.
-        """
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError(f"❌ Error: The file was not found at path: {pdf_path}")
-        if not pdf_path.lower().endswith('.pdf'):
-            raise ValueError("❌ Error: The file must be a PDF document (.pdf extension).")
-            
-        self.pdf_path = pdf_path
-        self.raw_text: str | None = None
-        print(f"📄 DocumentProcessor initialized for: {self.pdf_path}")
-
-
-    def extract_text(self) -> str:
-        """
-        Extracts all text from all pages of the PDF.
-
-        :return: A single string containing the entire content of the PDF.
-        """
-        if self.raw_text:
-            return self.raw_text
-
-        try:
-            with open(self.pdf_path, 'rb') as file:
-                reader = PdfReader(file)
-                text_content = []
-                
-                # Iterate through all pages and extract text
-                for page in reader.pages:
-                    text_content.append(page.extract_text() or "")
-                
-                # Join the text from all pages and clean up common PDF extraction artifacts
-                self.raw_text = "\n".join(text_content).strip()
-                
-                if not self.raw_text:
-                    # Raises an error if no text was found (e.g., image-based PDF)
-                    raise Exception("The PDF extraction yielded no text. The document might be image-based or empty.")
-
-                print(f"✅ Text extracted successfully. Total characters: {len(self.raw_text)}")
-                return self.raw_text
-
-        except Exception as e:
-            print(f"❌ An error occurred during PDF text extraction: {e}")
-            self.raw_text = ""
-            return ""
-
-
-    def fragment_text(self, split_by: TextSplitOption = "paragraph") -> List[str]:
-        """
-        Splits the extracted text into fragments: by paragraphs, sentences, or lines.
-        
-        :param split_by: Fragmentation option ('paragraph', 'sentence', or 'line').
-        :return: A list of strings, where each string is a study chunk.
-        """
-        if not self.raw_text:
-            # Attempt to extract text if it hasn't been done yet
-            self.extract_text()
-            if not self.raw_text:
-                return []
-        
-        # Normalize line breaks and remove excessive white space
-        cleaned_text = self.raw_text.replace('\r\n', '\n').replace('\r', '\n')
-        
-        fragments: List[str] = []
-        
-        if split_by == "paragraph":
-            # Split by two or more newlines (common paragraph separator)
-            fragments = [
-                p.strip() 
-                for p in cleaned_text.split('\n\n') 
-                if p.strip()
-            ]
-            print(f"✂️ Text fragmented by paragraph. Total fragments: {len(fragments)}")
-        
-        elif split_by == "sentence":
-            # Split by sentence-ending punctuation (., !, ?)
-            # This regex looks for punctuation followed by space/newline or end of string
-            # and keeps the punctuation with the sentence
-            sentence_pattern = r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])|(?<=[.!?])$'
-            
-            # First, replace newlines within paragraphs with spaces
-            text_for_sentences = re.sub(r'(?<!\n)\n(?!\n)', ' ', cleaned_text)
-            
-            # Then split by the sentence pattern
-            raw_sentences = re.split(sentence_pattern, text_for_sentences)
-            
-            fragments = [
-                sent.strip() 
-                for sent in raw_sentences 
-                if sent.strip() and len(sent.strip()) > 3  # Avoid very short fragments
-            ]
-            print(f"✂️ Text fragmented by sentence. Total fragments: {len(fragments)}")
-        
-        elif split_by == "line":
-            # Split by single newline (actual lines in the document)
-            fragments = [
-                line.strip() 
-                for line in cleaned_text.split('\n') 
-                if line.strip()
-            ]
-            print(f"✂️ Text fragmented by line. Total fragments: {len(fragments)}")
-        
-        else:
-            print(f"⚠️ Unknown split option: {split_by}. Defaulting to paragraph split.")
-            return self.fragment_text(split_by="paragraph")
-        
-        return fragments
-
-# --- Example Usage for Terminal Testing ---
-
-def run_cli_test():
-    """
-    Test function to run the processor from the terminal.
-    It simulates loading a PDF and choosing the fragmentation.
-    """
-    print("\n--- Document Processor CLI Test ---")
+    Uploads a PDF, calls the Gemini API to generate structured JSON,
+    and then cleans up the uploaded file from the Gemini service.
     
-    # NOTE: You MUST replace 'sample_document.pdf' with a valid path to a test PDF
-    pdf_path = input("Enter the path to your PDF file (e.g., /path/to/doc.pdf): ")
-    if not pdf_path:
-        print("Test cancelled. Please provide a path next time.")
-        return
-
+    :param user_pdf_path: The local path to the user's uploaded PDF file.
+    :param model_name: The Gemini model to use for extraction.
+    :return: A dictionary containing the structured study data, or None on error.
+    """
+    pdf_file = None
     try:
-        processor = DocumentProcessor(pdf_path)
+        # 1. Upload the user file
+        print(f"Uploading file for analysis: {os.path.basename(user_pdf_path)}...")
+        pdf_file = client.files.upload(file=user_pdf_path)
         
-        # 1. Extraction
-        text = processor.extract_text()
-        if not text:
-            return
+        # 2. Request configuration with schema
+        config = types.GenerateContentConfig(
+            temperature=0.1, 
+            response_mime_type="application/json",
+            response_schema=json_schema,
+        )
 
-        # 2. Split Option Choice
-        split_choice = input("Split by (p)aragraph or (l)ine? [p/l]: ").lower()
-        
-        if split_choice == 'l':
-            split_option: TextSplitOption = "line"
-        else:
-            split_option: TextSplitOption = "paragraph"
-            
-        # 3. Fragmentation
-        study_chunks = processor.fragment_text(split_option)
+        # 3. Content: Prompt and the uploaded file
+        contents = [PROMPT_INSTRUCTION, pdf_file]
 
-        if study_chunks:
-            print("\n📚 First 5 Study Chunks:")
-            for i, chunk in enumerate(study_chunks[:5]):
-                # Print first 80 chars of the chunk
-                print(f"  [{i+1}] {chunk[:80]}...")
-            
-            print(f"\nSummary: Loaded {len(study_chunks)} chunks using '{split_option}' split.")
-            
-    except FileNotFoundError as e:
-        print(e)
-    except ValueError as e:
-        print(e)
+        # 4. API Call
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        # 5. Return the JSON as a Python dictionary
+        data = json.loads(response.text)
+        # Add today's date for consistency
+        data['uploaded_date'] = date.today().isoformat()
+        return data
+
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-
-
-if __name__ == '__main__':
-    run_cli_test()
+        print(f"❌ An error occurred during Gemini processing: {e}")
+        return None
+        
+    finally:
+        # 6. Cleanup: Delete the file uploaded to the Gemini service.
+        if pdf_file:
+            client.files.delete(name=pdf_file.name)
+            print(f"Temporary file {pdf_file.name} deleted from Gemini service.")

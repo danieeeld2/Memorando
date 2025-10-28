@@ -1,14 +1,17 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Literal, List, Annotated
 import json
 import os
 import sqlite3
+import shutil
+import tempfile
 
 from backend.core.session_manager import SessionManager
 from backend.services.study_service import StudyService, AVAILABLE_METHODS
 from backend.services.user_service import UserService, user_service 
 from backend.core.db_manager import db_manager
+from backend.core.document_processor import process_pdf_to_json
 
 
 # --- Pydantic Models: User Auth ---
@@ -27,7 +30,12 @@ class UserAuthResponse(BaseModel):
     email: str
     name: str
 
-# --- Pydantic Models: Study Session ---
+# --- Pydantic Models: Document and Study Session ---
+
+class DocumentUploadResponse(BaseModel):
+    document_id: int = Field(..., description="The ID of the newly uploaded and processed document.")
+    title: str = Field(..., description="The title of the document as determined by the AI model.")
+    message: str = Field("Document processed and saved successfully.", description="Confirmation message.")
 
 class CreateSessionsRequest(BaseModel):
     segments_per_session: int = Field(..., gt=0, description="Number of segments 'n' for each session chunk.")
@@ -65,6 +73,15 @@ def get_user_service() -> UserService:
 
 UserDep = Annotated[UserService, Depends(get_user_service)]
 
+# --- Mock Dependency for User ID ---
+def get_current_user_id() -> int:
+    """Mock function to simulate getting the authenticated user's ID."""
+    # Use 1 as a mock ID. This must be replaced with real authentication.
+    return 1
+
+UserAuthDep = Annotated[int, Depends(get_current_user_id)]
+
+
 # --- API Router ---
 router = APIRouter(prefix="/study", tags=["Study & Auth"])
 
@@ -76,9 +93,7 @@ study_service = StudyService()
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=UserAuthResponse)
 async def register_user(request: UserRegisterRequest, user_service: UserDep):
-    """
-    Registers a new user and returns user ID and details.
-    """
+    """Registers a new user and returns user ID and details."""
     user_data = user_service.register_user(request.email, request.password, request.name)
     
     if not user_data:
@@ -92,9 +107,7 @@ async def register_user(request: UserRegisterRequest, user_service: UserDep):
 
 @router.post("/login", response_model=UserAuthResponse)
 async def login_user(request: UserLoginRequest, user_service: UserDep):
-    """
-    Authenticates a user and returns their details.
-    """
+    """Authenticates a user and returns their details."""
     user_data = user_service.login_user(request.email, request.password)
     
     if user_data:
@@ -105,13 +118,77 @@ async def login_user(request: UserLoginRequest, user_service: UserDep):
         detail="Invalid email or password"
     )
 
+# --- Document Upload Endpoint ---
+
+@router.post("/upload-document", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload_document(
+    file: UploadFile = File(..., description="The PDF file to be processed."),
+    user_id: int = Depends(get_current_user_id)  
+):
+    """
+    Handles the upload of a PDF file, processes it with the AI model to extract 
+    structured JSON, and saves the result to the database and file system.
+    """
+    if file.content_type != 'application/pdf':
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are allowed.")
+    
+    # 1. Save the uploaded file temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        try:
+            # Write the UploadFile content to the temporary file
+            shutil.copyfileobj(file.file, tmp)
+            temp_path = tmp.name
+        finally:
+            file.file.close()
+
+    document_title = file.filename.replace('.pdf', '')
+    
+    try:
+        # 2. Process the PDF using the Gemini API
+        structured_json_data = process_pdf_to_json(user_pdf_path=temp_path)
+        
+        if structured_json_data is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                detail="AI processing failed or returned invalid data. Check API Key and logs."
+            )
+            
+        # 3. Get the final title from the AI output
+        final_title = structured_json_data.get('title', document_title)
+
+        # 4. Save the document JSON and record in the database
+        new_doc_id = db_manager.save_document_json(
+            user_id=user_id,  
+            title=final_title,
+            json_data=structured_json_data
+        )
+        
+        if new_doc_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save document record to the database."
+            )
+
+        return DocumentUploadResponse(document_id=new_doc_id, title=final_title)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"An unexpected error occurred during document processing: {e}"
+        )
+    finally:
+        # 5. Cleanup: Delete the local temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            print(f"Temporary file {temp_path} deleted from local system.")
+
 # --- Session Management Endpoints ---
 
 @router.post("/documents/{document_id}/create-sessions", response_model=List[Dict[str, Any]])
 def create_study_sessions(document_id: int, request: CreateSessionsRequest):
-    """
-    Generates and stores study sessions for a document based on segment count.
-    """
+    """Generates and stores study sessions for a document based on segment count."""
     conn = db_manager.get_connection()
     cursor = conn.cursor()
     
@@ -148,11 +225,9 @@ def create_study_sessions(document_id: int, request: CreateSessionsRequest):
 
 @router.get("/documents/{document_id}/sessions", response_model=List[StudySessionInfo])
 def get_document_sessions(document_id: int):
-    """
-    Returns a list of all available study sessions generated for a specific document.
-    """
+    """Returns a list of all available study sessions generated for a specific document."""
     conn = db_manager.get_connection()
-    conn.row_factory = sqlite3.Row # To get results as dicts
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
     cursor.execute(
@@ -170,10 +245,7 @@ def get_document_sessions(document_id: int):
 
 @router.get("/sessions/{session_id}", response_model=List[str])
 def get_session_content(session_id: int):
-    """
-    Returns the content (list of strings) for a specific session ID
-    by reading its generated JSON file.
-    """
+    """Returns the content (list of strings) for a specific session ID."""
     conn = db_manager.get_connection()
     cursor = conn.cursor()
     
@@ -188,7 +260,7 @@ def get_session_content(session_id: int):
     session_json_path = session_data[0]
     
     if not os.path.exists(session_json_path):
-        raise HTTPException(status_code=404, detail="Session JSON file not found on server. It may have been moved or deleted.")
+        raise HTTPException(status_code=404, detail="Session JSON file not found on server.")
 
     # 2. Load the session content from its specific JSON
     try:
@@ -209,9 +281,7 @@ def get_session_content(session_id: int):
 
 @router.post("/start", response_model=StudyStatusResponse)
 def start_study(request: StartStudyRequest):
-    """
-    Starts a new study session in the background using the specified method and content.
-    """
+    """Starts a new study session in the background."""
     success = study_service.start_study_session(
         session_content=request.session_content,
         method_name=request.method_name,
@@ -226,25 +296,21 @@ def start_study(request: StartStudyRequest):
         )
     else:
         raise HTTPException(
-            status_code=409, # Conflict
+            status_code=409,
             detail="Failed to start study session. A session may already be active."
         )
 
 
 @router.post("/stop", response_model=StudyStatusResponse)
 def stop_study():
-    """
-    Requests the active study session to stop gracefully.
-    """
+    """Requests the active study session to stop gracefully."""
     study_service.stop_study_session()
     return StudyStatusResponse(is_active=False, current_method=None)
 
 
 @router.get("/status", response_model=StudyStatusResponse)
 def get_study_status():
-    """
-    Retrieves the current status of the study application.
-    """
+    """Retrieves the current status of the study application."""
     current_method_name = study_service.current_method.name if study_service.current_method else None
     
     return StudyStatusResponse(
@@ -255,12 +321,9 @@ def get_study_status():
 
 @router.get("/methods", response_model=MethodListResponse)
 def list_available_methods():
-    """
-    Lists all implemented study methods available for use.
-    """
+    """Lists all implemented study methods available for use."""
     method_descriptions = {
-        name: method_cls(None, [], {}).name # Pass dummy args
+        name: method_cls(None, [], {}).name
         for name, method_cls in AVAILABLE_METHODS.items()
     }
     return MethodListResponse(methods=method_descriptions)
-

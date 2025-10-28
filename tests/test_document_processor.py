@@ -1,123 +1,119 @@
 import pytest
 import os
 import sys
-from pypdf import PdfReader 
-from unittest.mock import patch
+import json
+from unittest.mock import patch, MagicMock
+from datetime import date
 
 # Add the 'backend' directory to the path for correct imports from your project structure
 # This is crucial for pytest to find your core modules.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
 
-# Import the classes to be tested from your backend structure
-from core.document_processor import DocumentProcessor, TextSplitOption 
+# Import the function to be tested
+from core.document_processor import process_pdf_to_json 
 
-# --- Setup Fixtures (Mocks and Helpers) ---
+# --- Setup Fixtures and Mock Data ---
 
-# Mock classes to simulate PDF reading without needing a real file
-class MockPdfPage:
-    """Simulates a single PDF page for text extraction."""
-    def __init__(self, text):
-        self._text = text
-    def extract_text(self):
-        return self._text
+# Define the expected JSON output (what Gemini would return)
+MOCK_GEMINI_JSON_OUTPUT = {
+    "title": "A Study of Quantum AI",
+    "language": "en",
+    "chapters": [
+        {"chapter_title": "Introduction", "sections": []}
+    ],
+    "structured_elements": []
+}
 
-class MockPdfReader:
-    """Simulates the PyPDF2 PdfReader class. We patch the real one with this."""
-    def __init__(self, texts):
-        self.pages = [MockPdfPage(text) for text in texts]
-
-# Mock data simulating a two-page document with different line breaks
-MOCK_PAGE_TEXTS = [
-    "This is the first paragraph. It is a continuation sentence.\nThis is the second line.",
-    "Page two starts here, with three sentences.\n\nThis is a new paragraph, separated by a double newline."
-]
+# The Gemini API returns a response object with a 'text' property containing the JSON string.
+MOCK_RESPONSE_TEXT = json.dumps(MOCK_GEMINI_JSON_OUTPUT)
 
 @pytest.fixture
 def mock_pdf_file(tmp_path):
-    """Creates a temporary, existing file path (content doesn't matter since PdfReader is mocked)."""
-    # Create a dummy file path that actually exists in the filesystem, 
-    # so DocumentProcessor doesn't fail on os.path.exists() check.
-    dummy_pdf_path = tmp_path / "dummy_doc.pdf"
+    """Creates a temporary, existing file path for testing."""
+    dummy_pdf_path = tmp_path / "test_doc.pdf"
     dummy_pdf_path.write_text("dummy content")
     return str(dummy_pdf_path)
 
-# --- DocumentProcessor Tests ---
+# --- Test Case for Successful API Call ---
 
-def test_initialization_success(mock_pdf_file):
-    """Verifies successful initialization with a valid path."""
-    processor = DocumentProcessor(mock_pdf_file)
-    assert processor.pdf_path == mock_pdf_file
-
-def test_initialization_file_not_found():
-    """Verifies that FileNotFoundError is raised if the file does not exist."""
-    with pytest.raises(FileNotFoundError, match="not found"):
-        DocumentProcessor("non_existent_file.pdf")
-
-def test_initialization_invalid_extension(tmp_path):
-    """Test that initialization raises ValueError for non-PDF files."""
-    dummy_file = tmp_path / "image.jpg"
-    dummy_file.write_text("dummy content")
-    with pytest.raises(ValueError, match="must be a PDF document"):
-        DocumentProcessor(str(dummy_file))
-
-@patch('core.document_processor.PdfReader', side_effect=lambda x: MockPdfReader(MOCK_PAGE_TEXTS))
-def test_extract_text_success(mock_reader, mock_pdf_file):
-    """Tests simulated text extraction."""
-    processor = DocumentProcessor(mock_pdf_file)
-    text = processor.extract_text()
+# The test uses three patches:
+# 1. 'client': Mocks the genai.Client() instance.
+# 2. 'date.today': Ensures the 'uploaded_date' is consistent for assertion.
+@patch("core.document_processor.date")
+@patch("core.document_processor.client") 
+def test_process_pdf_to_json_success(mock_client, mock_date, mock_pdf_file):
+    """
+    Tests the successful end-to-end process: 
+    1. Uploads file.
+    2. Calls generate_content.
+    3. Deletes file.
+    4. Returns correct structured JSON.
+    """
+    # 1. Setup Mock Date
+    fixed_date_str = "2025-10-27"
     
-    assert "Page two starts here" in text
-    assert len(text) > 100 # Check for non-empty string
+    # Create a mock object that mimics the return value of date.today()
+    mock_today_date = MagicMock()
+    # Ensure that when .isoformat() is called on the mock, it returns a fixed string
+    mock_today_date.isoformat.return_value = fixed_date_str
 
-@patch('core.document_processor.PdfReader', side_effect=lambda x: MockPdfReader(MOCK_PAGE_TEXTS))
-def test_fragment_by_paragraph(mock_reader, mock_pdf_file):
-    """Tests fragmentation by paragraph (split by multiple newlines)."""
-    processor = DocumentProcessor(mock_pdf_file)
-    processor.extract_text() 
+    # Tell the patched 'date' module that its 'today()' method should return our mock date object
+    mock_date.today.return_value = mock_today_date
 
-    # CORREGIDO: Cambiado 'split_option' a 'split_by'
-    chunks = processor.fragment_text(split_by="paragraph")
+    # 2. Setup Mock Client Behavior
+    # --- Mock File Upload ---
+    mock_file_handle = MagicMock()
+    mock_file_handle.name = "files/mock-pdf-12345" 
+    mock_client.files.upload.return_value = mock_file_handle
     
-    # Expect 3 or more distinct fragments based on the mock text structure
-    assert len(chunks) >= 2 
-    assert "This is the first paragraph" in chunks[0]
-    assert "new paragraph" in chunks[-1]
+    # --- Mock Gemini Response ---
+    mock_response = MagicMock()
+    mock_response.text = MOCK_RESPONSE_TEXT 
+    mock_client.models.generate_content.return_value = mock_response
 
+    # 3. Execute the function
+    result = process_pdf_to_json(mock_pdf_file)
 
-@patch('core.document_processor.PdfReader', side_effect=lambda x: MockPdfReader(MOCK_PAGE_TEXTS))
-def test_fragment_by_line(mock_reader, mock_pdf_file):
-    """Tests fragmentation by line (split by single newline)."""
-    processor = DocumentProcessor(mock_pdf_file)
-    processor.extract_text() 
+    # 4. Assertions
 
-    # CORREGIDO: Cambiado 'split_option' a 'split_by'
-    chunks = processor.fragment_text(split_by="line")
-    
-    # Expect more fragments when splitting by single line
-    assert len(chunks) == 4
-    assert 'This is the second line.' in chunks
-    
-@patch('core.document_processor.PdfReader', side_effect=lambda x: MockPdfReader(MOCK_PAGE_TEXTS))
-def test_fragment_by_sentence(mock_reader, mock_pdf_file):
-    """Tests fragmentation by sentence (split by punctuation marks)."""
-    processor = DocumentProcessor(mock_pdf_file)
-    processor.extract_text() 
+    # A. Verify API interactions
+    # Check that the file was uploaded
+    mock_client.files.upload.assert_called_once() 
+    # Check that the content generation was called with the uploaded file
+    mock_client.models.generate_content.assert_called_once()
+    # Check that the temporary file was cleaned up (deleted)
+    mock_client.files.delete.assert_called_once_with(name=mock_file_handle.name)
 
-    chunks = processor.fragment_text(split_by="sentence")
+    # B. Verify Output structure and content
+    assert isinstance(result, dict)
+    assert result["title"] == MOCK_GEMINI_JSON_OUTPUT["title"]
+    # CRITICAL: Verify the date was correctly injected/updated by the function
+    assert result["uploaded_date"] == fixed_date_str
+    assert result["language"] == MOCK_GEMINI_JSON_OUTPUT["language"]
+
+# --- Test Case for Error Handling ---
+
+@patch("core.document_processor.client")
+def test_process_pdf_to_json_api_error(mock_client, mock_pdf_file):
+    """
+    Tests that the function handles exceptions (like a failed API call or network error) 
+    and still attempts file cleanup.
+    """
+    # 1. Setup Mock Client Behavior
+    mock_file_handle = MagicMock()
+    mock_file_handle.name = "files/mock-pdf-error-54321" 
+    mock_client.files.upload.return_value = mock_file_handle
     
-    # Expect multiple sentences to be separated
-    assert len(chunks) >= 4  # At least 4 distinct sentences in MOCK_PAGE_TEXTS
+    # Force the API call (generate_content) to raise an exception
+    mock_client.models.generate_content.side_effect = Exception("Simulated API Error")
+
+    # 2. Execute the function
+    result = process_pdf_to_json(mock_pdf_file)
+
+    # 3. Assertions
     
-    # Verify that sentences are properly separated
-    # First sentence should contain "first paragraph"
-    assert any("first paragraph" in chunk for chunk in chunks)
+    # Check that the function returned None on failure
+    assert result is None 
     
-    # Check that each chunk ends with proper punctuation
-    for chunk in chunks:
-        assert chunk.strip()[-1] in '.!?', f"Sentence should end with punctuation: {chunk}"
-    
-    # Verify sentences are independent (not containing multiple sentences)
-    # Count periods/exclamations/questions in each chunk (should be mostly 1)
-    for chunk in chunks:
-        punctuation_count = sum(chunk.count(p) for p in '.!?')
-        assert punctuation_count >= 1, f"Sentence should have at least one punctuation mark: {chunk}"
+    # CRITICAL: Check that file cleanup (delete) was *still* called, even after the error
+    mock_client.files.delete.assert_called_once_with(name=mock_file_handle.name)
